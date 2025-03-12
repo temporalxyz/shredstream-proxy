@@ -1,6 +1,6 @@
 use std::{
-    io,
-    io::{Error, ErrorKind},
+    fs::File,
+    io::{self, Error, ErrorKind, Read},
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     panic,
     path::{Path, PathBuf},
@@ -9,8 +9,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, RwLock,
     },
-    thread,
-    thread::{sleep, spawn, JoinHandle},
+    thread::{self, sleep, spawn, JoinHandle},
     time::Duration,
 };
 
@@ -47,8 +46,16 @@ enum ProxySubcommands {
     /// Requests shreds from Jito and sends to all destinations.
     Shredstream(ShredstreamArgs),
 
+    ShredstreamFileConfig(ShredstreamFileConfigArgs),
+
     /// Does not request shreds from Jito. Sends anything received on `src-bind-addr`:`src-bind-port` to all destinations.
     ForwardOnly(CommonArgs),
+}
+
+#[derive(clap::Args, Clone, Debug)]
+struct ShredstreamFileConfigArgs {
+    #[arg(long, env)]
+    config: PathBuf,
 }
 
 #[derive(clap::Args, Clone, Debug)]
@@ -192,11 +199,25 @@ fn main() -> Result<(), ShredstreamProxyError> {
     env_logger::builder().init();
     let all_args: Args = Args::parse();
 
+    // Potentially override *ALL* CLI args with config file
+    let all_args = match all_args.shredstream_args {
+        ProxySubcommands::ShredstreamFileConfig(args) => {
+            let config = load_shredstream_config(&args.config)?;
+            Args {
+                shredstream_args: ProxySubcommands::Shredstream(config),
+            }
+        }
+        other => Args {
+            shredstream_args: other,
+        },
+    };
+
     let shredstream_args = all_args.shredstream_args.clone();
     // common args
     let args = match all_args.shredstream_args {
         ProxySubcommands::Shredstream(x) => x.common_args,
         ProxySubcommands::ForwardOnly(x) => x,
+        ProxySubcommands::ShredstreamFileConfig(_) => unreachable!(),
     };
     set_host_id(hostname::get()?.into_string().unwrap());
     if (args.endpoint_discovery_url.is_none() && args.discovered_endpoints_port.is_some())
@@ -355,4 +376,97 @@ fn start_heartbeat(
         shutdown_receiver.clone(),
         exit.clone(),
     )
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct ShredstreamConfig {
+    block_engine_url: String,
+    #[serde(default)]
+    auth_url: Option<String>,
+    auth_keypair: PathBuf,
+    desired_regions: Vec<String>,
+    common: CommonConfig,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct CommonConfig {
+    #[serde(default = "default_src_bind_addr")]
+    src_bind_addr: IpAddr,
+    #[serde(default = "default_src_bind_port")]
+    src_bind_port: u16,
+    #[serde(default)]
+    dest_ip_ports: Vec<String>,
+    #[serde(default)]
+    endpoint_discovery_url: Option<String>,
+    #[serde(default)]
+    discovered_endpoints_port: Option<u16>,
+    #[serde(default = "default_metrics_report_interval")]
+    metrics_report_interval_ms: u64,
+    #[serde(default)]
+    debug_trace_shred: bool,
+    #[serde(default)]
+    public_ip: Option<IpAddr>,
+    #[serde(default)]
+    num_threads: Option<usize>,
+}
+
+// Default value functions for CommonConfig
+fn default_src_bind_addr() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))
+}
+
+fn default_src_bind_port() -> u16 {
+    20_000
+}
+
+fn default_metrics_report_interval() -> u64 {
+    15_000
+}
+
+impl TryFrom<ShredstreamConfig> for ShredstreamArgs {
+    type Error = io::Error;
+
+    fn try_from(config: ShredstreamConfig) -> Result<Self, Self::Error> {
+        Ok(ShredstreamArgs {
+            block_engine_url: config.block_engine_url,
+            auth_url: config.auth_url,
+            auth_keypair: config.auth_keypair,
+            desired_regions: config.desired_regions,
+            common_args: config.common.try_into()?,
+        })
+    }
+}
+
+impl TryFrom<CommonConfig> for CommonArgs {
+    type Error = io::Error;
+
+    fn try_from(config: CommonConfig) -> Result<Self, Self::Error> {
+        Ok(CommonArgs {
+            src_bind_addr: config.src_bind_addr,
+            src_bind_port: config.src_bind_port,
+            dest_ip_ports: config
+                .dest_ip_ports
+                .into_iter()
+                .map(|addr| resolve_hostname_port(&addr))
+                .collect::<Result<Vec<_>, _>>()?,
+            endpoint_discovery_url: config.endpoint_discovery_url,
+            discovered_endpoints_port: config.discovered_endpoints_port,
+            metrics_report_interval_ms: config.metrics_report_interval_ms,
+            debug_trace_shred: config.debug_trace_shred,
+            public_ip: config.public_ip,
+            num_threads: config.num_threads,
+        })
+    }
+}
+
+fn load_shredstream_config(path: &Path) -> io::Result<ShredstreamArgs> {
+    let mut contents = String::new();
+    File::open(path)?.read_to_string(&mut contents)?;
+    let config: ShredstreamConfig = toml::from_str(&contents).map_err(|e| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("Failed to parse config file: {}", e),
+        )
+    })?;
+    config.try_into()
 }
