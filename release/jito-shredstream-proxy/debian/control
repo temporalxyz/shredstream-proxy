@@ -1,0 +1,11 @@
+Source: jito-shredstream-proxy
+Section: utils
+Priority: optional
+Maintainer: Jito Labs <maintainer@jito.wtf>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.5.1
+
+Package: jito-shredstream-proxy
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Proxy for Solana shreds 

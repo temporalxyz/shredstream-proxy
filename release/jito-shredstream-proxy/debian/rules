@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+
+export NO_DBGSYM=1
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Binary is built by cargo in the GitHub workflow
+
+override_dh_auto_install:
+	mkdir -p usr/bin
+	cp $(CURDIR)/../../target/release/jito-shredstream-proxy usr/bin/
